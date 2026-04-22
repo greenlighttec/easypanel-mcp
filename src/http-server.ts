@@ -7,6 +7,9 @@
  *                credentials and gets their own bound access token
  *
  * A new MCP session is bound to whatever EasyPanelClient the auth layer resolves.
+ * In OAuth mode, if Easypanel rejects a call as unauthorized, we revoke the
+ * bound OAuth tokens and drop any sessions using them so the client is forced
+ * to re-authenticate.
  */
 
 import { createServer } from "node:http";
@@ -27,11 +30,21 @@ export interface HttpServerOptions {
   oauthStorePath?: string;
 }
 
+interface SessionEntry {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+  bearer?: string;
+}
+
+interface ResolvedAuth {
+  client: EasyPanelClient;
+  bearer?: string;
+}
+
 export async function startHttpServer(opts: HttpServerOptions) {
-  const sessions = new Map<
-    string,
-    { transport: StreamableHTTPServerTransport; server: McpServer }
-  >();
+  const sessions = new Map<string, SessionEntry>();
+  /** OAuth mode only: bearer access_token -> set of session-ids created under it. */
+  const bearerSessions = new Map<string, Set<string>>();
 
   let oauth: OAuthHandler | undefined;
   let store: OAuthStore | undefined;
@@ -46,6 +59,21 @@ export async function startHttpServer(opts: HttpServerOptions) {
       easypanelUrl: opts.easypanelUrl,
       store,
     });
+  }
+
+  function revokeBearer(bearer: string): void {
+    if (!store) return;
+    store.revokeToken(bearer);
+    const sids = bearerSessions.get(bearer);
+    if (!sids) return;
+    for (const sid of sids) {
+      const entry = sessions.get(sid);
+      if (entry) {
+        try { entry.transport.close(); } catch { /* noop */ }
+        sessions.delete(sid);
+      }
+    }
+    bearerSessions.delete(bearer);
   }
 
   const httpServer = createServer(async (req, res) => {
@@ -80,14 +108,20 @@ export async function startHttpServer(opts: HttpServerOptions) {
       return;
     }
 
-    // Resolve caller's EasyPanelClient from Authorization.
-    const client = resolveClient(req, res, opts, store);
-    if (!client) return;
+    const auth = resolveAuth(req, res, opts, store, revokeBearer);
+    if (!auth) return;
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (sessionId && sessions.has(sessionId)) {
       const session = sessions.get(sessionId)!;
+      if (opts.authMode === "oauth" && session.bearer && session.bearer !== auth.bearer) {
+        // Session was created under a different bearer — don't let another
+        // user's token reuse it.
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Session does not belong to this token. Please reinitialize." }));
+        return;
+      }
       await session.transport.handleRequest(req, res);
       return;
     }
@@ -101,15 +135,23 @@ export async function startHttpServer(opts: HttpServerOptions) {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { transport, server });
+        sessions.set(id, { transport, server, bearer: auth.bearer });
+        if (auth.bearer) {
+          let set = bearerSessions.get(auth.bearer);
+          if (!set) { set = new Set(); bearerSessions.set(auth.bearer, set); }
+          set.add(id);
+        }
       },
     });
 
-    const server = opts.createMcpServer(client);
+    const server = opts.createMcpServer(auth.client);
 
     transport.onclose = () => {
-      const id = [...sessions.entries()].find(([, v]) => v.transport === transport)?.[0];
-      if (id) sessions.delete(id);
+      for (const [sid, entry] of sessions.entries()) {
+        if (entry.transport !== transport) continue;
+        sessions.delete(sid);
+        if (entry.bearer) bearerSessions.get(entry.bearer)?.delete(sid);
+      }
     };
 
     await server.connect(transport);
@@ -125,14 +167,15 @@ export async function startHttpServer(opts: HttpServerOptions) {
   });
 }
 
-function resolveClient(
+function resolveAuth(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
   opts: HttpServerOptions,
   store: OAuthStore | undefined,
-): EasyPanelClient | null {
-  const auth = req.headers.authorization;
-  const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  revokeBearer: (bearer: string) => void,
+): ResolvedAuth | null {
+  const authHeader = req.headers.authorization;
+  const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
   if (opts.authMode === "oauth") {
     if (!bearer) {
@@ -144,7 +187,10 @@ function resolveClient(
       sendUnauthorized(res, opts.oauthIssuer!, "invalid_token");
       return null;
     }
-    return new EasyPanelClient(token.easypanel_url, token.easypanel_token);
+    const client = new EasyPanelClient(token.easypanel_url, token.easypanel_token, {
+      onAuthFailure: () => revokeBearer(bearer),
+    });
+    return { client, bearer };
   }
 
   // bearer mode
@@ -157,7 +203,8 @@ function resolveClient(
       return null;
     }
   }
-  return new EasyPanelClient(opts.easypanelUrl, opts.bearerEasypanelToken!);
+  const client = new EasyPanelClient(opts.easypanelUrl, opts.bearerEasypanelToken!);
+  return { client };
 }
 
 function sendUnauthorized(
