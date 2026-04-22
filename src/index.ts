@@ -6,15 +6,22 @@
  * Covers 347 tRPC procedures total.
  *
  * Env:
- *   EASYPANEL_URL         - Panel URL (required)
- *   EASYPANEL_TOKEN       - API token (required for stdio and bearer HTTP mode)
- *   EASYPANEL_MCP_MODE    - "stdio" (default) or "http"
- *   EASYPANEL_AUTH_MODE   - "bearer" (default) or "oauth" (HTTP mode only)
- *   MCP_API_KEY           - Shared key for bearer HTTP mode
- *   OAUTH_ISSUER_URL      - Public URL of this server when auth mode is oauth
- *   OAUTH_STORE_PATH      - Where to persist OAuth state (default ./.easypanel-mcp-oauth.json)
- *   MCP_ACCESS_MODE       - "full" (default) or "readonly"
- *   PORT                  - HTTP port (default 3100)
+ *   EASYPANEL_URL                       - Panel URL (required)
+ *   EASYPANEL_TOKEN                     - API token (required for stdio and bearer HTTP mode)
+ *   EASYPANEL_MCP_MODE                  - "stdio" (default) or "http"
+ *   EASYPANEL_AUTH_MODE                 - "bearer" (default) or "oauth" (HTTP mode only)
+ *   MCP_API_KEY                         - Shared key for bearer HTTP mode
+ *   OAUTH_ISSUER_URL                    - Public URL of this server when auth mode is oauth
+ *   OAUTH_STORE_PATH                    - Where to persist OAuth state (default ./.easypanel-mcp-oauth.json)
+ *   MCP_ACCESS_MODE                     - "full" (default) or "readonly"
+ *   PORT                                - HTTP port (default 3100)
+ *
+ *   Cloudflare Zero Trust (all optional):
+ *   CF_ACCESS_CLIENT_ID                 - Service token ID; sent on every backend Easypanel call
+ *   CF_ACCESS_CLIENT_SECRET             - Service token secret
+ *   CF_ACCESS_TEAM_DOMAIN               - e.g. "your-team.cloudflareaccess.com"; enables JWT verification
+ *   CF_ACCESS_AUD                       - Application AUD tag from CF Access; required with TEAM_DOMAIN
+ *   CF_ACCESS_REQUIRE_EMAIL_MATCH       - "true" to require submitted Easypanel email == CF-auth email
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -269,6 +276,27 @@ return server;
 
 const port = parseInt(process.env.PORT || "3100", 10);
 
+const backendHeaders: Record<string, string> = {};
+if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+  backendHeaders["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
+  backendHeaders["CF-Access-Client-Secret"] = process.env.CF_ACCESS_CLIENT_SECRET;
+}
+
+const cfTeam = process.env.CF_ACCESS_TEAM_DOMAIN?.trim();
+const cfAud = process.env.CF_ACCESS_AUD?.trim();
+const cfRequireEmailMatch = (process.env.CF_ACCESS_REQUIRE_EMAIL_MATCH || "").toLowerCase() === "true";
+if ((cfTeam && !cfAud) || (cfAud && !cfTeam)) {
+  console.error("CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD must be set together");
+  process.exit(1);
+}
+if (cfRequireEmailMatch && !(cfTeam && cfAud)) {
+  console.error("CF_ACCESS_REQUIRE_EMAIL_MATCH requires CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD");
+  process.exit(1);
+}
+const cfAccess = cfTeam && cfAud
+  ? { teamDomain: cfTeam.replace(/^https?:\/\//, "").replace(/\/+$/, ""), audience: cfAud, requireEmailMatch: cfRequireEmailMatch }
+  : undefined;
+
 if (MODE === "http") {
   const { startHttpServer } = await import("./http-server.js");
   await startHttpServer({
@@ -280,9 +308,13 @@ if (MODE === "http") {
     bearerEasypanelToken: EP_TOKEN,
     oauthIssuer: process.env.OAUTH_ISSUER_URL,
     oauthStorePath: process.env.OAUTH_STORE_PATH,
+    backendHeaders: Object.keys(backendHeaders).length ? backendHeaders : undefined,
+    cfAccess,
   });
 } else {
-  const client = new EasyPanelClient(EP_URL!, EP_TOKEN!);
+  const client = new EasyPanelClient(EP_URL!, EP_TOKEN!, {
+    extraHeaders: Object.keys(backendHeaders).length ? backendHeaders : undefined,
+  });
   const server = createServer(client);
   const transport = new StdioServerTransport();
   await server.connect(transport);

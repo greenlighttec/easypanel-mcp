@@ -18,11 +18,18 @@ import { URL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { EasyPanelClient } from "../client.js";
 import { OAuthStore, sha256Base64Url, type OAuthClient } from "./store.js";
+import { CFAccessVerifier, extractCFToken } from "./cf-access.js";
 
 export interface OAuthConfig {
   issuer: string;
   easypanelUrl: string;
   store: OAuthStore;
+  /** Extra headers to send on backend calls to Easypanel (e.g. CF service tokens). */
+  backendHeaders?: Record<string, string>;
+  /** If set, /authorize POST enforces a valid CF Access JWT before accepting credentials. */
+  cfAccessVerifier?: CFAccessVerifier;
+  /** If true, submitted Easypanel email must equal the CF-authenticated email. */
+  cfAccessRequireEmailMatch?: boolean;
 }
 
 type PendingAuthParams = {
@@ -45,10 +52,14 @@ export class OAuthHandler {
     const url = new URL(req.url || "/", this.cfg.issuer);
     const pathname = url.pathname;
 
-    if (pathname === "/.well-known/oauth-authorization-server") {
+    // Serve both the base and path-aware well-known variants (RFC 9728 §3.1 / RFC 8414 §3.1).
+    // MCP clients may request either form depending on which side constructs the URL.
+    if (pathname === "/.well-known/oauth-authorization-server"
+        || pathname === "/.well-known/oauth-authorization-server/mcp") {
       return this.serveAuthServerMetadata(res);
     }
-    if (pathname === "/.well-known/oauth-protected-resource") {
+    if (pathname === "/.well-known/oauth-protected-resource"
+        || pathname === "/.well-known/oauth-protected-resource/mcp") {
       return this.serveProtectedResourceMetadata(res);
     }
     if (pathname === "/register" && req.method === "POST") {
@@ -87,7 +98,9 @@ export class OAuthHandler {
   private serveProtectedResourceMetadata(res: ServerResponse): true {
     const issuer = this.cfg.issuer;
     json(res, 200, {
-      resource: issuer,
+      // MCP's OAuth profile wants the canonical resource URL to include the
+      // protocol endpoint path, not just the origin.
+      resource: `${issuer}/mcp`,
       authorization_servers: [issuer],
       scopes_supported: ["mcp"],
       bearer_methods_supported: ["header"],
@@ -184,6 +197,32 @@ export class OAuthHandler {
       return true;
     }
 
+    // Optional: enforce that the request actually came through CF Access.
+    let cfEmail: string | null = null;
+    if (this.cfg.cfAccessVerifier) {
+      const token = extractCFToken(req);
+      if (!token) {
+        htmlError(res, 403, "Cloudflare Access required", "This deployment requires the login page to be reached through Cloudflare Access.");
+        return true;
+      }
+      try {
+        const claims = await this.cfg.cfAccessVerifier.verify(token);
+        cfEmail = claims.email || null;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        htmlError(res, 403, "Cloudflare Access verification failed", msg);
+        return true;
+      }
+      if (this.cfg.cfAccessRequireEmailMatch) {
+        if (!cfEmail || cfEmail.toLowerCase() !== email.toLowerCase()) {
+          res.writeHead(403, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(renderLoginPage(params, this.cfg.easypanelUrl,
+            `Email must match your Cloudflare identity${cfEmail ? ` (${cfEmail})` : ""}.`));
+          return true;
+        }
+      }
+    }
+
     const client = this.cfg.store.getClient(params.client_id);
     if (!client || !client.redirect_uris.includes(params.redirect_uri)) {
       htmlError(res, 400, "Unknown client", "client_id or redirect_uri is not registered.");
@@ -191,7 +230,9 @@ export class OAuthHandler {
     }
 
     // Attempt login against Easypanel.
-    const epClient = new EasyPanelClient(this.cfg.easypanelUrl);
+    const epClient = new EasyPanelClient(this.cfg.easypanelUrl, undefined, {
+      extraHeaders: this.cfg.backendHeaders,
+    });
     let token: string;
     try {
       const loginInput: Record<string, unknown> = { email, password };
