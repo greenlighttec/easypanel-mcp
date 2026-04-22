@@ -209,7 +209,7 @@ function resolveAuth(
 
   if (opts.authMode === "oauth") {
     if (!bearer) {
-      sendUnauthorized(res, opts.oauthIssuer!);
+      sendUnauthorized(res, opts.oauthIssuer!, "missing_token");
       return null;
     }
     const token = store!.getAccessToken(bearer);
@@ -243,15 +243,21 @@ function resolveAuth(
 function sendUnauthorized(
   res: import("node:http").ServerResponse,
   issuer: string,
-  errorCode: "invalid_token" | "" = "",
+  reason: "missing_token" | "invalid_token" = "missing_token",
 ): void {
-  // Point at the path-aware variant — the resource is /mcp, so per RFC 9728
-  // its metadata lives at /.well-known/oauth-protected-resource/mcp.
+  // Matches the format produced by the reference TypeScript SDK's auth
+  // middleware and Cloudflare's workers-oauth-provider, both of which are
+  // verified working with Claude's connector. Includes realm, error,
+  // error_description, and resource_metadata.
   const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
-  const parts: string[] = [];
-  if (errorCode) parts.push(`error="${errorCode}"`);
-  parts.push(`resource_metadata="${metadataUrl}"`);
-  res.setHeader("WWW-Authenticate", `Bearer ${parts.join(", ")}`);
+  const errorCode = "invalid_token";
+  const errorDesc = reason === "missing_token"
+    ? "Missing Authorization header"
+    : "Invalid or expired access token";
+  res.setHeader(
+    "WWW-Authenticate",
+    `Bearer realm="OAuth", error="${errorCode}", error_description="${errorDesc}", resource_metadata="${metadataUrl}"`,
+  );
   res.writeHead(401, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ resource_metadata: metadataUrl }));
+  res.end(JSON.stringify({ error: errorCode, error_description: errorDesc }));
 }
