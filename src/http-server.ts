@@ -248,13 +248,10 @@ function sendUnauthorized(
   // Point at the path-aware variant — the resource is /mcp, so per RFC 9728
   // its metadata lives at /.well-known/oauth-protected-resource/mcp.
   const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
-  const parts = [`Bearer realm="mcp"`, `resource_metadata="${metadataUrl}"`];
+  const parts: string[] = [];
   if (errorCode) parts.push(`error="${errorCode}"`);
-  res.setHeader("WWW-Authenticate", parts.join(", "));
+  parts.push(`resource_metadata="${metadataUrl}"`);
+  res.setHeader("WWW-Authenticate", `Bearer ${parts.join(", ")}`);
   res.writeHead(401, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({
-    error: "unauthorized",
-    error_description: "Obtain an access token via the OAuth flow.",
-    resource_metadata: metadataUrl,
-  }));
+  res.end(JSON.stringify({ resource_metadata: metadataUrl }));
 }
