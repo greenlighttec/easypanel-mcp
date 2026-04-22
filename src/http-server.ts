@@ -85,10 +85,30 @@ export async function startHttpServer(opts: HttpServerOptions) {
     bearerSessions.delete(bearer);
   }
 
+  const logLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
+  const logAccess = logLevel !== "silent";
+  const logDebug = logLevel === "debug";
+
   const httpServer = createServer(async (req, res) => {
+    const started = Date.now();
+    if (logAccess) {
+      const fwd = req.headers["x-forwarded-for"];
+      const ip = (Array.isArray(fwd) ? fwd[0] : fwd)?.toString().split(",")[0].trim()
+        || req.socket.remoteAddress || "-";
+      const ua = req.headers["user-agent"] || "-";
+      const origin = req.headers["origin"] || "-";
+      res.on("finish", () => {
+        const ms = Date.now() - started;
+        console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} ${ms}ms ip=${ip} origin=${origin} ua="${ua}"`);
+      });
+      if (logDebug) {
+        console.log(`[${new Date().toISOString()}] REQ headers:`, JSON.stringify(req.headers));
+      }
+    }
+
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version");
     res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate");
 
     if (req.method === "OPTIONS") {
@@ -150,6 +170,7 @@ export async function startHttpServer(opts: HttpServerOptions) {
           if (!set) { set = new Set(); bearerSessions.set(auth.bearer, set); }
           set.add(id);
         }
+        if (logAccess) console.log(`[${new Date().toISOString()}] MCP session opened: ${id}`);
       },
     });
 
