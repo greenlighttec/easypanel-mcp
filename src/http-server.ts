@@ -18,6 +18,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { EasyPanelClient } from "./client.js";
 import { OAuthHandler } from "./oauth/handler.js";
 import { OAuthStore } from "./oauth/store.js";
+import { CFAccessVerifier, type CFAccessConfig } from "./oauth/cf-access.js";
 
 export interface HttpServerOptions {
   port: number;
@@ -28,6 +29,10 @@ export interface HttpServerOptions {
   bearerEasypanelToken?: string;
   oauthIssuer?: string;
   oauthStorePath?: string;
+  /** Extra headers to attach to every backend Easypanel call (e.g. CF service tokens). */
+  backendHeaders?: Record<string, string>;
+  /** If set, /authorize POST will verify a Cloudflare Access JWT. */
+  cfAccess?: CFAccessConfig;
 }
 
 interface SessionEntry {
@@ -54,10 +59,14 @@ export async function startHttpServer(opts: HttpServerOptions) {
     }
     store = new OAuthStore(opts.oauthStorePath ?? "./.easypanel-mcp-oauth.json");
     await store.load();
+    const cfAccessVerifier = opts.cfAccess ? new CFAccessVerifier(opts.cfAccess) : undefined;
     oauth = new OAuthHandler({
       issuer: opts.oauthIssuer.replace(/\/+$/, ""),
       easypanelUrl: opts.easypanelUrl,
       store,
+      backendHeaders: opts.backendHeaders,
+      cfAccessVerifier,
+      cfAccessRequireEmailMatch: opts.cfAccess?.requireEmailMatch,
     });
   }
 
@@ -189,6 +198,7 @@ function resolveAuth(
     }
     const client = new EasyPanelClient(token.easypanel_url, token.easypanel_token, {
       onAuthFailure: () => revokeBearer(bearer),
+      extraHeaders: opts.backendHeaders,
     });
     return { client, bearer };
   }
@@ -203,7 +213,9 @@ function resolveAuth(
       return null;
     }
   }
-  const client = new EasyPanelClient(opts.easypanelUrl, opts.bearerEasypanelToken!);
+  const client = new EasyPanelClient(opts.easypanelUrl, opts.bearerEasypanelToken!, {
+    extraHeaders: opts.backendHeaders,
+  });
   return { client };
 }
 

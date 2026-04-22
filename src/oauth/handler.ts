@@ -18,11 +18,18 @@ import { URL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { EasyPanelClient } from "../client.js";
 import { OAuthStore, sha256Base64Url, type OAuthClient } from "./store.js";
+import { CFAccessVerifier, extractCFToken } from "./cf-access.js";
 
 export interface OAuthConfig {
   issuer: string;
   easypanelUrl: string;
   store: OAuthStore;
+  /** Extra headers to send on backend calls to Easypanel (e.g. CF service tokens). */
+  backendHeaders?: Record<string, string>;
+  /** If set, /authorize POST enforces a valid CF Access JWT before accepting credentials. */
+  cfAccessVerifier?: CFAccessVerifier;
+  /** If true, submitted Easypanel email must equal the CF-authenticated email. */
+  cfAccessRequireEmailMatch?: boolean;
 }
 
 type PendingAuthParams = {
@@ -184,6 +191,32 @@ export class OAuthHandler {
       return true;
     }
 
+    // Optional: enforce that the request actually came through CF Access.
+    let cfEmail: string | null = null;
+    if (this.cfg.cfAccessVerifier) {
+      const token = extractCFToken(req);
+      if (!token) {
+        htmlError(res, 403, "Cloudflare Access required", "This deployment requires the login page to be reached through Cloudflare Access.");
+        return true;
+      }
+      try {
+        const claims = await this.cfg.cfAccessVerifier.verify(token);
+        cfEmail = claims.email || null;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        htmlError(res, 403, "Cloudflare Access verification failed", msg);
+        return true;
+      }
+      if (this.cfg.cfAccessRequireEmailMatch) {
+        if (!cfEmail || cfEmail.toLowerCase() !== email.toLowerCase()) {
+          res.writeHead(403, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(renderLoginPage(params, this.cfg.easypanelUrl,
+            `Email must match your Cloudflare identity${cfEmail ? ` (${cfEmail})` : ""}.`));
+          return true;
+        }
+      }
+    }
+
     const client = this.cfg.store.getClient(params.client_id);
     if (!client || !client.redirect_uris.includes(params.redirect_uri)) {
       htmlError(res, 400, "Unknown client", "client_id or redirect_uri is not registered.");
@@ -191,7 +224,9 @@ export class OAuthHandler {
     }
 
     // Attempt login against Easypanel.
-    const epClient = new EasyPanelClient(this.cfg.easypanelUrl);
+    const epClient = new EasyPanelClient(this.cfg.easypanelUrl, undefined, {
+      extraHeaders: this.cfg.backendHeaders,
+    });
     let token: string;
     try {
       const loginInput: Record<string, unknown> = { email, password };

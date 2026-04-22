@@ -9,17 +9,25 @@ export interface EasyPanelClientOptions {
    * MCP call forces a re-login.
    */
   onAuthFailure?: () => void;
+  /**
+   * Extra headers to send on every request. Intended for things like
+   * Cloudflare Access service tokens (CF-Access-Client-Id / CF-Access-Client-Secret)
+   * so the shim can reach an Easypanel API that sits behind CF Zero Trust.
+   */
+  extraHeaders?: Record<string, string>;
 }
 
 export class EasyPanelClient {
   private baseUrl: string;
   private token: string | null = null;
   private onAuthFailure?: () => void;
+  private extraHeaders: Record<string, string>;
 
   constructor(baseUrl: string, token?: string, opts?: EasyPanelClientOptions) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token ?? null;
     this.onAuthFailure = opts?.onAuthFailure;
+    this.extraHeaders = opts?.extraHeaders ?? {};
   }
 
   async login(email: string, password: string): Promise<string> {
@@ -52,6 +60,7 @@ export class EasyPanelClient {
       const mod = parsed.protocol === "https:" ? https : http;
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        ...this.extraHeaders,
       };
       if (this.token) {
         headers["Authorization"] = `Bearer ${this.token}`;
