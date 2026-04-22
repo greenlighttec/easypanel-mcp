@@ -52,10 +52,14 @@ export class OAuthHandler {
     const url = new URL(req.url || "/", this.cfg.issuer);
     const pathname = url.pathname;
 
-    if (pathname === "/.well-known/oauth-authorization-server") {
+    // Serve both the base and path-aware well-known variants (RFC 9728 §3.1 / RFC 8414 §3.1).
+    // MCP clients may request either form depending on which side constructs the URL.
+    if (pathname === "/.well-known/oauth-authorization-server"
+        || pathname === "/.well-known/oauth-authorization-server/mcp") {
       return this.serveAuthServerMetadata(res);
     }
-    if (pathname === "/.well-known/oauth-protected-resource") {
+    if (pathname === "/.well-known/oauth-protected-resource"
+        || pathname === "/.well-known/oauth-protected-resource/mcp") {
       return this.serveProtectedResourceMetadata(res);
     }
     if (pathname === "/register" && req.method === "POST") {
@@ -94,7 +98,9 @@ export class OAuthHandler {
   private serveProtectedResourceMetadata(res: ServerResponse): true {
     const issuer = this.cfg.issuer;
     json(res, 200, {
-      resource: issuer,
+      // MCP's OAuth profile wants the canonical resource URL to include the
+      // protocol endpoint path, not just the origin.
+      resource: `${issuer}/mcp`,
       authorization_servers: [issuer],
       scopes_supported: ["mcp"],
       bearer_methods_supported: ["header"],

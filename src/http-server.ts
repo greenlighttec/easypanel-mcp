@@ -224,7 +224,9 @@ function sendUnauthorized(
   issuer: string,
   errorCode: "invalid_token" | "" = "",
 ): void {
-  const metadataUrl = `${issuer}/.well-known/oauth-protected-resource`;
+  // Point at the path-aware variant — the resource is /mcp, so per RFC 9728
+  // its metadata lives at /.well-known/oauth-protected-resource/mcp.
+  const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
   const parts = [`Bearer realm="mcp"`, `resource_metadata="${metadataUrl}"`];
   if (errorCode) parts.push(`error="${errorCode}"`);
   res.setHeader("WWW-Authenticate", parts.join(", "));
