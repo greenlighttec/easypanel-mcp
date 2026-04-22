@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 /**
  * EasyPanel MCP Server
- * 
+ *
  * ~40 curated tools for the most common operations + trpc_raw for everything else.
  * Covers 347 tRPC procedures total.
  *
  * Env:
- *   EASYPANEL_URL   - Panel URL
- *   EASYPANEL_TOKEN - API token
+ *   EASYPANEL_URL         - Panel URL (required)
+ *   EASYPANEL_TOKEN       - API token (required for stdio and bearer HTTP mode)
+ *   EASYPANEL_MCP_MODE    - "stdio" (default) or "http"
+ *   EASYPANEL_AUTH_MODE   - "bearer" (default) or "oauth" (HTTP mode only)
+ *   MCP_API_KEY           - Shared key for bearer HTTP mode
+ *   OAUTH_ISSUER_URL      - Public URL of this server when auth mode is oauth
+ *   OAUTH_STORE_PATH      - Where to persist OAuth state (default ./.easypanel-mcp-oauth.json)
+ *   MCP_ACCESS_MODE       - "full" (default) or "readonly"
+ *   PORT                  - HTTP port (default 3100)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -16,15 +23,20 @@ import { z } from "zod";
 import { EasyPanelClient } from "./client.js";
 
 const EP_URL = process.env.EASYPANEL_URL;
-const EP_TOKEN = process.env.EASYPANEL_TOKEN;
+const MODE = process.env.EASYPANEL_MCP_MODE || "stdio";
+const AUTH_MODE = (process.env.EASYPANEL_AUTH_MODE || "bearer").toLowerCase() as "bearer" | "oauth";
 
 if (!EP_URL) { console.error("EASYPANEL_URL required"); process.exit(1); }
-if (!EP_TOKEN) { console.error("EASYPANEL_TOKEN required"); process.exit(1); }
 
-const client = new EasyPanelClient(EP_URL, EP_TOKEN);
+const needsStaticToken = MODE !== "http" || AUTH_MODE !== "oauth";
+const EP_TOKEN = process.env.EASYPANEL_TOKEN;
+if (needsStaticToken && !EP_TOKEN) {
+  console.error("EASYPANEL_TOKEN required (unless EASYPANEL_AUTH_MODE=oauth)");
+  process.exit(1);
+}
 
-function createServer() {
-const server = new McpServer({ name: "easypanel", version: "0.2.0" });
+function createServer(client: EasyPanelClient) {
+const server = new McpServer({ name: "easypanel", version: "0.3.0" });
 
 function ok(r: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(r, null, 2) }] };
@@ -255,15 +267,23 @@ server.tool("trpc_raw", "Call any EasyPanel tRPC procedure directly. 347 procedu
 return server;
 }
 
-// Start in HTTP or stdio mode
-const mode = process.env.EASYPANEL_MCP_MODE || "stdio";
 const port = parseInt(process.env.PORT || "3100", 10);
 
-if (mode === "http") {
+if (MODE === "http") {
   const { startHttpServer } = await import("./http-server.js");
-  await startHttpServer(createServer, port);
+  await startHttpServer({
+    port,
+    easypanelUrl: EP_URL!,
+    authMode: AUTH_MODE,
+    createMcpServer: createServer,
+    bearerApiKey: process.env.MCP_API_KEY,
+    bearerEasypanelToken: EP_TOKEN,
+    oauthIssuer: process.env.OAUTH_ISSUER_URL,
+    oauthStorePath: process.env.OAUTH_STORE_PATH,
+  });
 } else {
-  const server = createServer();
+  const client = new EasyPanelClient(EP_URL!, EP_TOKEN!);
+  const server = createServer(client);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
