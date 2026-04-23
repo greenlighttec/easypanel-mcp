@@ -102,7 +102,18 @@ export async function startHttpServer(opts: HttpServerOptions) {
         console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} ${ms}ms ip=${ip} origin=${origin} ua="${ua}"`);
       });
       if (logDebug) {
-        console.log(`[${new Date().toISOString()}] REQ headers:`, JSON.stringify(req.headers));
+        const SENSITIVE = new Set([
+          "authorization",
+          "cookie",
+          "cf-access-jwt-assertion",
+          "proxy-authorization",
+          "x-api-key",
+        ]);
+        const safe: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          safe[k] = SENSITIVE.has(k.toLowerCase()) ? "[redacted]" : v;
+        }
+        console.log(`[${new Date().toISOString()}] REQ headers:`, JSON.stringify(safe));
       }
     }
 
@@ -209,7 +220,7 @@ function resolveAuth(
 
   if (opts.authMode === "oauth") {
     if (!bearer) {
-      sendUnauthorized(res, opts.oauthIssuer!);
+      sendUnauthorized(res, opts.oauthIssuer!, "missing_token");
       return null;
     }
     const token = store!.getAccessToken(bearer);
@@ -243,18 +254,21 @@ function resolveAuth(
 function sendUnauthorized(
   res: import("node:http").ServerResponse,
   issuer: string,
-  errorCode: "invalid_token" | "" = "",
+  reason: "missing_token" | "invalid_token" = "missing_token",
 ): void {
-  // Point at the path-aware variant — the resource is /mcp, so per RFC 9728
-  // its metadata lives at /.well-known/oauth-protected-resource/mcp.
+  // Matches the format produced by the reference TypeScript SDK's auth
+  // middleware and Cloudflare's workers-oauth-provider, both of which are
+  // verified working with Claude's connector. Includes realm, error,
+  // error_description, and resource_metadata.
   const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
-  const parts = [`Bearer realm="mcp"`, `resource_metadata="${metadataUrl}"`];
-  if (errorCode) parts.push(`error="${errorCode}"`);
-  res.setHeader("WWW-Authenticate", parts.join(", "));
+  const errorCode = "invalid_token";
+  const errorDesc = reason === "missing_token"
+    ? "Missing Authorization header"
+    : "Invalid or expired access token";
+  res.setHeader(
+    "WWW-Authenticate",
+    `Bearer realm="OAuth", error="${errorCode}", error_description="${errorDesc}", resource_metadata="${metadataUrl}"`,
+  );
   res.writeHead(401, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({
-    error: "unauthorized",
-    error_description: "Obtain an access token via the OAuth flow.",
-    resource_metadata: metadataUrl,
-  }));
+  res.end(JSON.stringify({ error: errorCode, error_description: errorDesc }));
 }

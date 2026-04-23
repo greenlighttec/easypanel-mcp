@@ -88,44 +88,44 @@ server.tool("inspect_project", "Get project details and Docker containers", {
 
 server.tool("create_app", "Create an app service", {
   ...ps,
-}, async (a) => m("app.createService", a));
+}, async (a) => m("services.app.createService", a));
 
 server.tool("inspect_app", "Get app service details (env, domains, build, source)", {
   ...ps,
-}, async (a) => q("app.inspectService", a));
+}, async (a) => q("services.app.inspectService", a));
 
 server.tool("deploy_app", "Trigger deployment for an app", {
   ...ps,
-}, async (a) => m("app.deployService", a));
+}, async (a) => m("services.app.deployService", a));
 
 server.tool("start_app", "Start an app service", { ...ps },
-  async (a) => m("app.startService", a));
+  async (a) => m("services.app.startService", a));
 
 server.tool("stop_app", "Stop an app service", { ...ps },
-  async (a) => m("app.stopService", a));
+  async (a) => m("services.app.stopService", a));
 
 server.tool("restart_app", "Restart an app service", { ...ps },
-  async (a) => m("app.restartService", a));
+  async (a) => m("services.app.restartService", a));
 
 server.tool("destroy_app", "Delete an app service", { ...ps },
-  async (a) => m("app.destroyService", a));
+  async (a) => m("services.app.destroyService", a));
 
 server.tool("set_app_source_image", "Set app source to a Docker image", {
   ...ps,
   image: z.string().describe("Docker image (e.g. nginx:latest)"),
-}, async (a) => m("app.updateSourceImage", a));
+}, async (a) => m("services.app.updateSourceImage", a));
 
 server.tool("set_app_source_github", "Set app source to a GitHub repo", {
   ...ps,
   owner: z.string(), repo: z.string(),
   branch: z.string().optional(),
   path: z.string().optional().describe("Subdirectory"),
-}, async (a) => m("app.updateSourceGithub", a));
+}, async (a) => m("services.app.updateSourceGithub", a));
 
 server.tool("set_app_env", "Update environment variables for an app", {
   ...ps,
   env: z.string().describe("KEY=VALUE lines"),
-}, async (a) => m("app.updateEnv", a));
+}, async (a) => m("services.app.updateEnv", a));
 
 server.tool("set_app_resources", "Set CPU/memory limits for an app", {
   ...ps,
@@ -133,7 +133,7 @@ server.tool("set_app_resources", "Set CPU/memory limits for an app", {
   memoryReservation: z.number().optional().describe("Memory reservation MB"),
   cpuLimit: z.number().optional().describe("CPU limit (1 = 1 core)"),
   cpuReservation: z.number().optional().describe("CPU reservation"),
-}, async (a) => m("app.updateResources", a));
+}, async (a) => m("services.app.updateResources", a));
 
 // ===================== DATABASES =====================
 
@@ -141,17 +141,17 @@ server.tool("create_database", "Create a database service", {
   ...ps,
   engine: z.enum(["postgres", "mysql", "mariadb", "mongo", "redis"]),
   password: z.string().optional().describe("Password (auto-generated if empty)"),
-}, async ({ engine, ...rest }) => m(`${engine}.createService`, rest));
+}, async ({ engine, ...rest }) => m(`services.${engine}.createService`, rest));
 
 server.tool("inspect_database", "Get database service info (connection string, status)", {
   ...ps,
   engine: z.enum(["postgres", "mysql", "mariadb", "mongo", "redis"]),
-}, async ({ engine, ...rest }) => q(`${engine}.inspectService`, rest));
+}, async ({ engine, ...rest }) => q(`services.${engine}.inspectService`, rest));
 
 server.tool("destroy_database", "Delete a database service", {
   ...ps,
   engine: z.enum(["postgres", "mysql", "mariadb", "mongo", "redis"]),
-}, async ({ engine, ...rest }) => m(`${engine}.destroyService`, rest));
+}, async ({ engine, ...rest }) => m(`services.${engine}.destroyService`, rest));
 
 // ===================== DOMAINS =====================
 
@@ -208,13 +208,13 @@ server.tool("storage_stats", "Get storage usage breakdown", {},
 // ===================== COMPOSE =====================
 
 server.tool("create_compose", "Create a Docker Compose service", { ...ps },
-  async (a) => m("compose.createService", a));
+  async (a) => m("services.compose.createService", a));
 
 server.tool("inspect_compose", "Get compose service details", { ...ps },
-  async (a) => q("compose.inspectService", a));
+  async (a) => q("services.compose.inspectService", a));
 
 server.tool("deploy_compose", "Deploy a compose service", { ...ps },
-  async (a) => m("compose.deployService", a));
+  async (a) => m("services.compose.deployService", a));
 
 // ===================== SYSTEM =====================
 
