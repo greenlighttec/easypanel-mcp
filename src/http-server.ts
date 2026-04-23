@@ -102,7 +102,18 @@ export async function startHttpServer(opts: HttpServerOptions) {
         console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} ${ms}ms ip=${ip} origin=${origin} ua="${ua}"`);
       });
       if (logDebug) {
-        console.log(`[${new Date().toISOString()}] REQ headers:`, JSON.stringify(req.headers));
+        const SENSITIVE = new Set([
+          "authorization",
+          "cookie",
+          "cf-access-jwt-assertion",
+          "proxy-authorization",
+          "x-api-key",
+        ]);
+        const safe: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          safe[k] = SENSITIVE.has(k.toLowerCase()) ? "[redacted]" : v;
+        }
+        console.log(`[${new Date().toISOString()}] REQ headers:`, JSON.stringify(safe));
       }
     }
 
