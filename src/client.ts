@@ -83,7 +83,7 @@ export class EasyPanelClient {
             // A non-JSON body on a 401/403 is almost always an upstream gateway
             // (e.g. a Cloudflare Access challenge/redirect page), not Easypanel.
             reject(new Error(httpAuthFailed
-              ? `Backend rejected with HTTP ${status} and a non-JSON body — this is an upstream gateway (likely Cloudflare Access), not Easypanel. Check the CF-Access service token. Body: ${data.slice(0, 300)}`
+              ? `Backend rejected with HTTP ${status} and a non-JSON body. Easypanel's tRPC layer returns JSON, so this is an intermediary (proxy/gateway such as Cloudflare Access) rather than Easypanel itself. Body: ${data.slice(0, 300)}`
               : `Invalid response (HTTP ${status}): ${data.slice(0, 500)}`));
             return;
           }
@@ -118,7 +118,7 @@ export class EasyPanelClient {
           // never reached Easypanel — surface it instead of returning a
           // tokenless "success" that later reads as "Login returned no token".
           if (httpAuthFailed) {
-            reject(new Error(`Backend rejected with HTTP ${status} and no tRPC envelope — this is an upstream gateway (likely Cloudflare Access), not Easypanel. Check the CF-Access service token. Body: ${JSON.stringify(parsed).slice(0, 300)}`));
+            reject(new Error(`Backend rejected with HTTP ${status} and no tRPC envelope. Easypanel's tRPC layer returns an {error} or {result} envelope, so a bare ${status} points at an intermediary (proxy/gateway) rather than Easypanel itself. Body: ${JSON.stringify(parsed).slice(0, 300)}`));
             return;
           }
 
