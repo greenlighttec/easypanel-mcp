@@ -239,9 +239,18 @@ export class OAuthHandler {
       if (totp) loginInput.code = totp;
       const result: any = await epClient.mutation("auth.login", loginInput);
       token = result?.token;
-      if (!token) throw new Error("Login returned no token");
+      if (!token) {
+        // A 2xx with no token means Easypanel accepted the call shape but
+        // returned no session — include what came back so the cause is visible.
+        throw new Error(
+          `Easypanel accepted the request but returned no token. Response: ${JSON.stringify(result).slice(0, 300)}`,
+        );
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // Always log the real reason server-side — the browser only ever saw a
+      // generic 401, which made this impossible to diagnose from the logs.
+      console.error(`[${new Date().toISOString()}] /authorize login failed for ${email}: ${msg}`);
       res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(renderLoginPage(params, this.cfg.easypanelUrl, `Login failed: ${msg}`));
       return true;

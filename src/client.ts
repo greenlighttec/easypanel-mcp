@@ -74,27 +74,55 @@ export class EasyPanelClient {
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
           const httpAuthFailed = status === 401 || status === 403;
-          try {
-            const json = JSON.parse(data);
-            const trpcCode =
-              json?.error?.json?.data?.code ??
-              json?.error?.data?.code ??
-              json?.error?.code;
-            const trpcAuthFailed = trpcCode === "UNAUTHORIZED" || trpcCode === "FORBIDDEN";
-            if (httpAuthFailed || trpcAuthFailed) this.fireAuthFailure();
 
-            if (json.error) {
-              const msg = json.error?.json?.message ?? json.error?.message ?? JSON.stringify(json.error);
-              reject(new Error(`tRPC error: ${msg}`));
-            } else if (json.result?.data?.json !== undefined) {
-              resolve(json.result.data.json);
-            } else {
-              resolve(json);
-            }
+          let parsed: any;
+          try {
+            parsed = data ? JSON.parse(data) : undefined;
           } catch {
             if (httpAuthFailed) this.fireAuthFailure();
-            reject(new Error(`Invalid response: ${data.slice(0, 500)}`));
+            // A non-JSON body on a 401/403 is almost always an upstream gateway
+            // (e.g. a Cloudflare Access challenge/redirect page), not Easypanel.
+            reject(new Error(httpAuthFailed
+              ? `Backend rejected with HTTP ${status} and a non-JSON body — this is an upstream gateway (likely Cloudflare Access), not Easypanel. Check the CF-Access service token. Body: ${data.slice(0, 300)}`
+              : `Invalid response (HTTP ${status}): ${data.slice(0, 500)}`));
+            return;
           }
+
+          // tRPC batches ([{...}]) when the client uses batching; unwrap the
+          // first entry so a batched envelope isn't mistaken for a bare payload.
+          const env = Array.isArray(parsed) ? parsed[0] : parsed;
+
+          const trpcCode =
+            env?.error?.json?.data?.code ??
+            env?.error?.data?.code ??
+            env?.error?.code;
+          const trpcAuthFailed = trpcCode === "UNAUTHORIZED" || trpcCode === "FORBIDDEN";
+          if (httpAuthFailed || trpcAuthFailed) this.fireAuthFailure();
+
+          if (env?.error) {
+            const msg = env.error?.json?.message ?? env.error?.message ?? JSON.stringify(env.error);
+            reject(new Error(`tRPC error: ${msg}`));
+            return;
+          }
+
+          // Success envelope: superjson nests the value under result.data.json;
+          // a plain (transformer-less) tRPC response puts it at result.data.
+          const dataNode = env?.result?.data;
+          if (dataNode !== undefined) {
+            resolve(dataNode?.json !== undefined ? dataNode.json : dataNode);
+            return;
+          }
+
+          // No recognizable tRPC envelope. On a 401/403 this is a gateway
+          // rejection (e.g. an expired Cloudflare Access service token) that
+          // never reached Easypanel — surface it instead of returning a
+          // tokenless "success" that later reads as "Login returned no token".
+          if (httpAuthFailed) {
+            reject(new Error(`Backend rejected with HTTP ${status} and no tRPC envelope — this is an upstream gateway (likely Cloudflare Access), not Easypanel. Check the CF-Access service token. Body: ${JSON.stringify(parsed).slice(0, 300)}`));
+            return;
+          }
+
+          resolve(parsed);
         });
       });
       req.on("error", reject);
