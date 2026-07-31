@@ -193,7 +193,7 @@ export class OAuthHandler {
 
     if (!email || !password) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(renderLoginPage(params, this.cfg.easypanelUrl, "Email and password are required."));
+      res.end(renderLoginPage(params, this.cfg.easypanelUrl, { error: "Email and password are required.", email }));
       return true;
     }
 
@@ -217,7 +217,7 @@ export class OAuthHandler {
         if (!cfEmail || cfEmail.toLowerCase() !== email.toLowerCase()) {
           res.writeHead(403, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
           res.end(renderLoginPage(params, this.cfg.easypanelUrl,
-            `Email must match your Cloudflare identity${cfEmail ? ` (${cfEmail})` : ""}.`));
+            { error: `Email must match your Cloudflare identity${cfEmail ? ` (${cfEmail})` : ""}.`, email }));
           return true;
         }
       }
@@ -233,26 +233,40 @@ export class OAuthHandler {
     const epClient = new EasyPanelClient(this.cfg.easypanelUrl, undefined, {
       extraHeaders: this.cfg.backendHeaders,
     });
-    let token: string;
+    let result: any;
     try {
-      const loginInput: Record<string, unknown> = { email, password };
-      if (totp) loginInput.code = totp;
-      const result: any = await epClient.mutation("auth.login", loginInput);
-      token = result?.token;
-      if (!token) {
-        // A 2xx with no token means Easypanel accepted the call shape but
-        // returned no session — include what came back so the cause is visible.
-        throw new Error(
-          `Easypanel accepted the request but returned no token. Response: ${JSON.stringify(result).slice(0, 300)}`,
-        );
-      }
+      result = await epClient.authLogin(email, password, totp || undefined);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Always log the real reason server-side — the browser only ever saw a
       // generic 401, which made this impossible to diagnose from the logs.
       console.error(`[${new Date().toISOString()}] /authorize login failed for ${email}: ${msg}`);
       res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(renderLoginPage(params, this.cfg.easypanelUrl, `Login failed: ${msg}`));
+      res.end(renderLoginPage(params, this.cfg.easypanelUrl, { error: `Login failed: ${msg}`, email }));
+      return true;
+    }
+
+    const token: string | undefined = result?.token;
+    if (!token) {
+      // Easypanel's 2FA flow is two-step: auth.login with email+password only
+      // returns { twoFactorEnabled: true } and NO token. We re-prompt for the
+      // authenticator code and re-submit email+password+code to complete login.
+      if (result?.twoFactorEnabled) {
+        // totp already supplied but still no token => the code was wrong/expired.
+        const badCode = Boolean(totp);
+        res.writeHead(badCode ? 401 : 200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(renderLoginPage(params, this.cfg.easypanelUrl, {
+          twoFactor: true,
+          email,
+          password,
+          error: badCode ? "That 2FA code was invalid or expired. Enter a fresh code from your authenticator." : undefined,
+        }));
+        return true;
+      }
+      const detail = `Easypanel returned no token. Response: ${JSON.stringify(result).slice(0, 300)}`;
+      console.error(`[${new Date().toISOString()}] /authorize login failed for ${email}: ${detail}`);
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(renderLoginPage(params, this.cfg.easypanelUrl, { error: `Login failed: ${detail}`, email }));
       return true;
     }
 
@@ -501,12 +515,48 @@ function escapeHtml(s: string): string {
   )[c]);
 }
 
-function renderLoginPage(params: PendingAuthParams, easypanelUrl: string, errorMsg?: string): string {
+interface LoginPageOptions {
+  error?: string;
+  /** Render the second step: ask only for the 2FA code, carrying credentials. */
+  twoFactor?: boolean;
+  email?: string;
+  password?: string;
+}
+
+function renderLoginPage(params: PendingAuthParams, easypanelUrl: string, opts: LoginPageOptions = {}): string {
+  const { error: errorMsg, twoFactor = false, email = "", password = "" } = opts;
   const hidden = (name: string, value: string | undefined) =>
     value ? `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">` : "";
   const err = errorMsg
     ? `<div class="err">${escapeHtml(errorMsg)}</div>`
     : "";
+  const oauthHidden = `${hidden("response_type", "code")}
+  ${hidden("client_id", params.client_id)}
+  ${hidden("redirect_uri", params.redirect_uri)}
+  ${hidden("state", params.state)}
+  ${hidden("code_challenge", params.code_challenge)}
+  ${hidden("code_challenge_method", params.code_challenge_method)}
+  ${hidden("scope", params.scope)}`;
+
+  // Step 2: the account has 2FA enabled. Carry email+password in hidden fields
+  // (they round-trip over HTTPS to the same origin and are never stored) so the
+  // user only has to enter the current authenticator code.
+  const fields = twoFactor
+    ? `${hidden("email", email)}
+  ${hidden("password", password)}
+  <label for="code">Authenticator code</label>
+  <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" required autofocus>`
+    : `<label for="email">Email</label>
+  <input id="email" name="email" type="email" value="${escapeHtml(email)}" autocomplete="username" required ${email ? "" : "autofocus"}>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required ${email ? "autofocus" : ""}>`;
+
+  const heading = twoFactor ? "Two-factor authentication" : "Sign in to EasyPanel";
+  const sub = twoFactor
+    ? `Your account has 2FA enabled. Enter the current code from your authenticator app to finish signing in as <code>${escapeHtml(email)}</code>.`
+    : `Authorizing access for an MCP client via <code>${escapeHtml(easypanelUrl)}</code>.`;
+  const buttonLabel = twoFactor ? "Verify & authorize" : "Continue";
+
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -529,23 +579,12 @@ function renderLoginPage(params: PendingAuthParams, easypanelUrl: string, errorM
 </style>
 </head><body>
 <form class="card" method="POST" action="/authorize" autocomplete="on">
-  <h1>Sign in to EasyPanel</h1>
-  <p class="sub">Authorizing access for an MCP client via <code>${escapeHtml(easypanelUrl)}</code>.</p>
+  <h1>${escapeHtml(heading)}</h1>
+  <p class="sub">${sub}</p>
   ${err}
-  <label for="email">Email</label>
-  <input id="email" name="email" type="email" autocomplete="username" required autofocus>
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password" required>
-  <label for="code">2FA code <span style="font-weight:400;color:#6b7280">(if enabled)</span></label>
-  <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code">
-  ${hidden("response_type", "code")}
-  ${hidden("client_id", params.client_id)}
-  ${hidden("redirect_uri", params.redirect_uri)}
-  ${hidden("state", params.state)}
-  ${hidden("code_challenge", params.code_challenge)}
-  ${hidden("code_challenge_method", params.code_challenge_method)}
-  ${hidden("scope", params.scope)}
-  <button type="submit">Authorize</button>
+  ${fields}
+  ${oauthHidden}
+  <button type="submit">${escapeHtml(buttonLabel)}</button>
   <p class="hint">Your credentials are sent to the Easypanel API and are not stored.</p>
 </form>
 </body></html>`;

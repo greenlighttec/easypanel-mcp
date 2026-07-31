@@ -36,6 +36,65 @@ export class EasyPanelClient {
     return this.token;
   }
 
+  /**
+   * Authenticate against Easypanel's login endpoint and return the unwrapped
+   * payload — e.g. `{ token }` on success, or `{ twoFactorEnabled: true }` when
+   * the account has 2FA and no (valid) code was supplied yet.
+   *
+   * Easypanel serves login at `POST /api/rpc/auth/login` (slash-separated,
+   * `rpc` not `trpc`) with a `{ json: <input> }` body and a `{ json: <output> }`
+   * response envelope — a different scheme from the `/api/trpc/<router>.<proc>`
+   * tool API. We also tolerate the legacy tRPC envelope so this keeps working
+   * if the endpoint is ever served either way.
+   */
+  authLogin(email: string, password: string, code?: string): Promise<any> {
+    const input: Record<string, unknown> = { email, password };
+    if (code) input.code = code;
+    const url = new URL(`${this.baseUrl}/api/rpc/auth/login`);
+    const mod = url.protocol === "https:" ? https : http;
+    const bodyStr = JSON.stringify({ json: input });
+
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(bodyStr).toString(),
+        ...this.extraHeaders,
+      };
+      const req = mod.request(url, { method: "POST", headers }, (res) => {
+        const status = res.statusCode ?? 0;
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          let parsed: any;
+          try {
+            parsed = data ? JSON.parse(data) : undefined;
+          } catch {
+            reject(new Error(`auth login returned a non-JSON response (HTTP ${status}) from ${url.pathname} — likely an intermediary (proxy/gateway) rather than Easypanel. Body: ${data.slice(0, 300)}`));
+            return;
+          }
+          // rpc envelope: { json: <data>, meta? }. Fall back to legacy tRPC
+          // ({ result: { data: { json } } }) and to a bare object.
+          const payload =
+            parsed?.json !== undefined ? parsed.json
+            : parsed?.result?.data?.json !== undefined ? parsed.result.data.json
+            : parsed;
+          // An error envelope, or a 4xx/5xx that carries no usable payload.
+          const errEnvelope = parsed?.error ?? parsed?.json?.error;
+          const usable = payload && (payload.token !== undefined || payload.twoFactorEnabled !== undefined);
+          if (errEnvelope || (status >= 400 && !usable)) {
+            const msg = errEnvelope?.message ?? errEnvelope?.json?.message ?? `HTTP ${status}`;
+            reject(new Error(`auth login rejected: ${msg}. Response: ${JSON.stringify(parsed).slice(0, 300)}`));
+            return;
+          }
+          resolve(payload);
+        });
+      });
+      req.on("error", reject);
+      req.write(bodyStr);
+      req.end();
+    });
+  }
+
   async query(procedure: string, input?: Record<string, unknown>): Promise<unknown> {
     let url = `${this.baseUrl}/api/trpc/${procedure}`;
     if (input) {
