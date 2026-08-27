@@ -2,14 +2,14 @@
 
 MCP server for [EasyPanel](https://easypanel.io) — manage your server, projects, services, databases, and domains through any MCP-compatible AI agent (Claude, Cursor, etc.).
 
-**40 curated tools** + raw tRPC access to all **347 EasyPanel API procedures**.
+**42 curated tools** + raw tRPC access to all **347 EasyPanel API procedures**.
 
 ## 🚀 Quick Setup (Deploy on EasyPanel)
 
 The easiest way — deploy the MCP server as a service on your own EasyPanel. Pick an auth mode:
 
 - **OAuth** (recommended) — users sign in with their Easypanel email/password in a browser popup. No tokens to generate or paste. Per-user access.
-- **Bearer** — one shared API key + one Easypanel token baked into env vars.
+- **Bearer** — one shared API key + one Easypanel token baked into env vars. `MCP_API_KEY` is **required**: the server refuses to start without it.
 
 ### OAuth mode (browser sign-in, per-user)
 
@@ -24,6 +24,7 @@ The easiest way — deploy the MCP server as a service on your own EasyPanel. Pi
    MCP_ACCESS_MODE=readonly
    PORT=3000
    ```
+   > `EASYPANEL_AUTH_MODE=oauth` is what makes `MCP_API_KEY` unnecessary here. In the default bearer mode an HTTP deployment **requires** `MCP_API_KEY` and the server refuses to start without it.
 4. (Optional but recommended) Mount a volume at `/data` and set `OAUTH_STORE_PATH=/data/oauth.json` so tokens survive redeploys.
 5. Deploy.
 
@@ -66,8 +67,8 @@ On first use the client will pop a browser window asking for your Easypanel cred
    ```
 
    > **Important:** Use `http://easypanel:3000` (internal Docker network) when deploying on the same EasyPanel instance.
-   > **`MCP_ACCESS_MODE`**: `readonly` blocks all write operations; set to `full` to allow mutations.
-   > ⚠️ **Set `MCP_API_KEY`** — without it, anyone with the URL can control your server. Use alphanumeric only (`!`, `%`, `^` may break in env vars).
+   > **`MCP_ACCESS_MODE`**: `readonly` rejects every tool call that would mutate your panel — including mutating procedures called through `trpc_raw` — and allows read-only calls through. Set to `full` to allow mutations.
+   > ⚠️ **`MCP_API_KEY` is required in HTTP bearer mode** — the server exits at startup if it is unset, rather than serving every tool unauthenticated. Use alphanumeric only (`!`, `%`, `^` may break in env vars).
 
 3. Connect Claude Desktop:
    ```json
@@ -108,7 +109,7 @@ npm install && npm run build
 }
 ```
 
-## 🔧 Available Tools (40)
+## 🔧 Available Tools (42)
 
 ### Projects
 `list_projects` · `create_project` · `destroy_project` · `inspect_project`
@@ -132,7 +133,7 @@ npm install && npm run build
 `create_compose` · `inspect_compose` · `deploy_compose`
 
 ### System
-`cleanup_docker` · `system_prune` · `restart_panel` · `reboot_server` · `list_users` · `list_certificates` · `list_nodes` · `deploy_template`
+`cleanup_docker` · `system_prune` · `restart_panel` · `reboot_server` · `list_users` · `list_certificates` · `list_nodes` · `deploy_template` · `list_actions` · `get_action_log`
 
 ### Escape Hatch
 `trpc_raw` — call any of the 347 tRPC procedures directly
@@ -140,7 +141,7 @@ npm install && npm run build
 ## 🔒 Security
 
 - **OAuth mode** — per-user access via browser sign-in; the MCP server acts as an OAuth 2.1 authorization server (PKCE required, dynamic client registration per RFC 7591). Access tokens are opaque and bound to the user's Easypanel session token server-side; credentials never leave this server in stored form.
-- **Bearer mode** — `MCP_API_KEY` protects the endpoint, `EASYPANEL_TOKEN` is used for all API calls.
+- **Bearer mode** — `MCP_API_KEY` protects the endpoint and is mandatory (the server refuses to start without it), `EASYPANEL_TOKEN` is used for all API calls.
 - Health endpoint (`/health`) is always public (returns no sensitive data).
 - In local/stdio mode, no network auth is needed.
 
@@ -152,11 +153,20 @@ npm install && npm run build
 | `EASYPANEL_TOKEN` | Bearer/stdio | API token from login (not needed in OAuth mode) |
 | `EASYPANEL_MCP_MODE` | For HTTP | `stdio` (default) or `http` |
 | `EASYPANEL_AUTH_MODE` | No | `bearer` (default) or `oauth` |
-| `MCP_API_KEY` | Bearer HTTP | Shared key protecting the endpoint |
+| `MCP_API_KEY` | ✅ Bearer HTTP | Shared key protecting the endpoint — required, the server will not start without it |
 | `OAUTH_ISSUER_URL` | OAuth | Public URL of this server (e.g. `https://mcp.example.com`) |
 | `OAUTH_STORE_PATH` | No | Where to persist OAuth state (default `./.easypanel-mcp-oauth.json`) |
-| `MCP_ACCESS_MODE` | No | `full` (default) or `readonly` — blocks all mutations |
+| `MCP_ACCESS_MODE` | No | `full` (default) or `readonly` — `readonly` rejects every mutating tool call, `trpc_raw` mutations included |
 | `PORT` | No | HTTP port (default: 3100) |
+| `MCP_BIND_HOST` | No | Listen address (default: `0.0.0.0`) |
+| `MCP_ALLOWED_ORIGINS` | No | Comma-separated CORS origin allowlist |
+| `EASYPANEL_TIMEOUT_MS` | No | Timeout for calls to EasyPanel, in ms (default: 30000) |
+| `LOG_LEVEL` | No | `debug`, `info` (default), `warn` or `error` |
+| `CF_ACCESS_TEAM_DOMAIN` | No | Cloudflare Access team domain (e.g. `your-team.cloudflareaccess.com`) — enables JWT verification |
+| `CF_ACCESS_AUD` | No | Cloudflare Access application AUD tag — required with `CF_ACCESS_TEAM_DOMAIN` |
+| `CF_ACCESS_REQUIRE_EMAIL_MATCH` | No | `true` to require the submitted Easypanel email to match the Cloudflare-authenticated one |
+| `CF_ACCESS_CLIENT_ID` | No | Cloudflare Access service token ID, sent on every backend Easypanel call |
+| `CF_ACCESS_CLIENT_SECRET` | No | Cloudflare Access service token secret |
 
 ## OAuth Endpoints
 
