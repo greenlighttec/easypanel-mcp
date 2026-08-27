@@ -7,7 +7,9 @@
  * the authenticated user's email.
  *
  * We fetch the CF Access JWKS once and cache it. Keys rotate infrequently;
- * we refresh on cache miss (unknown kid) and on a 10-minute TTL.
+ * we refresh on cache miss (unknown kid) and on a 10-minute TTL. Cache-miss
+ * refreshes are rate-limited and deduplicated so unauthenticated tokens with
+ * random kids cannot be turned into outbound fetch amplification.
  *
  * Spec: https://developers.cloudflare.com/cloudflare-one/identity/authorization-cookie/validating-json/
  */
@@ -37,6 +39,7 @@ interface Claims {
   iss: string;
   aud: string | string[];
   exp: number;
+  nbf?: number;
   iat?: number;
   email?: string;
   sub?: string;
@@ -44,10 +47,19 @@ interface Claims {
 }
 
 const JWKS_TTL_MS = 10 * 60 * 1000;
+const JWKS_FETCH_TIMEOUT_MS = 10_000;
+// An unknown kid may only trigger one outbound JWKS fetch per minute; anything
+// arriving inside that window is rejected instead of refetching.
+const FORCED_REFRESH_MIN_INTERVAL_MS = 60 * 1000;
+// Tolerance applied to both exp and nbf so a slightly fast or slow host clock
+// does not spuriously reject valid tokens.
+const CLOCK_SKEW_SEC = 60;
 
 export class CFAccessVerifier {
   private keys = new Map<string, KeyObject>();
   private lastFetched = 0;
+  private lastForcedRefresh = 0;
+  private inflight: Promise<void> | null = null;
 
   constructor(private readonly cfg: CFAccessConfig) {}
 
@@ -88,8 +100,14 @@ export class CFAccessVerifier {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    if (typeof payload.exp !== "number" || payload.exp < now) {
+    if (typeof payload.exp !== "number" || payload.exp + CLOCK_SKEW_SEC < now) {
       throw new Error("Token expired");
+    }
+    // nbf is optional in CF Access tokens, but when present it must be honoured.
+    if (payload.nbf !== undefined) {
+      if (typeof payload.nbf !== "number" || payload.nbf - CLOCK_SKEW_SEC > now) {
+        throw new Error("Token not yet valid");
+      }
     }
     if (payload.iss !== this.issuer) {
       throw new Error(`Bad issuer: ${payload.iss}`);
@@ -112,8 +130,49 @@ export class CFAccessVerifier {
 
   private async refresh(force: boolean): Promise<void> {
     if (!force && Date.now() - this.lastFetched < JWKS_TTL_MS) return;
+
+    // Concurrent callers share a single outbound request. Without this, a burst
+    // of tokens carrying unknown kids would each issue their own JWKS fetch.
+    if (this.inflight) return this.inflight;
+
+    if (force) {
+      if (Date.now() - this.lastForcedRefresh < FORCED_REFRESH_MIN_INTERVAL_MS) {
+        throw new Error("JWKS refresh rate-limited; rejecting unknown kid");
+      }
+      // Stamped before the fetch so a failing endpoint cannot be retried in a
+      // tight loop either.
+      this.lastForcedRefresh = Date.now();
+    }
+
+    // The in-flight promise is always cleared once settled, so a rejected fetch
+    // is never cached and poisons no later call: the next caller retries.
+    const pending = this.fetchKeys();
+    this.inflight = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.inflight === pending) this.inflight = null;
+    }
+  }
+
+  private async fetchKeys(): Promise<void> {
     const url = `${this.issuer}/cdn-cgi/access/certs`;
-    const res = await fetch(url);
+    // A hung CF endpoint must not stall /authorize while we are holding the
+    // user's submitted panel credentials, so the fetch is bounded.
+    let res: Awaited<ReturnType<typeof fetch>>;
+    try {
+      res = await fetch(url, {
+        signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (isAbortError(err)) {
+        throw new Error(
+          `JWKS fetch timed out after ${JWKS_FETCH_TIMEOUT_MS}ms`,
+        );
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`JWKS fetch failed: ${msg}`);
+    }
     if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
     const doc = (await res.json()) as { keys: JWK[] };
     const next = new Map<string, KeyObject>();
@@ -129,6 +188,17 @@ export class CFAccessVerifier {
     this.keys = next;
     this.lastFetched = Date.now();
   }
+}
+
+/**
+ * fetch() surfaces an AbortSignal.timeout() as a DOMException whose name varies
+ * across Node releases ("TimeoutError" or "AbortError"), sometimes only on the
+ * wrapped `cause`, so both are checked.
+ */
+function isAbortError(err: unknown): boolean {
+  const named = (e: unknown): boolean =>
+    e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+  return named(err) || (err instanceof Error && named(err.cause));
 }
 
 function parseJsonB64Url(segment: string): any {

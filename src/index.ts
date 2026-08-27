@@ -29,8 +29,20 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { EasyPanelClient } from "./client.js";
 
+// A malformed request must not take the whole server down. Registered before any
+// transport starts so startup failures are caught too. Logging goes to stderr only:
+// stdout is the JSON-RPC channel in stdio mode and any stray write corrupts it.
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+});
+
 const EP_URL = process.env.EASYPANEL_URL;
-const MODE = process.env.EASYPANEL_MCP_MODE || "stdio";
+// Normalized like AUTH_MODE below, so EASYPANEL_MCP_MODE=HTTP does not silently
+// fall back to stdio (and silently skip the HTTP-mode auth guard).
+const MODE = (process.env.EASYPANEL_MCP_MODE || "stdio").toLowerCase();
 const AUTH_MODE = (process.env.EASYPANEL_AUTH_MODE || "bearer").toLowerCase() as "bearer" | "oauth";
 
 if (!EP_URL) { console.error("EASYPANEL_URL required"); process.exit(1); }
@@ -42,23 +54,43 @@ if (needsStaticToken && !EP_TOKEN) {
   process.exit(1);
 }
 
+// Fail closed: HTTP + bearer with no shared key would serve every tool - i.e. full
+// control of the panel - to any unauthenticated caller. Refuse to start instead.
+if (MODE === "http" && AUTH_MODE === "bearer" && !process.env.MCP_API_KEY?.trim()) {
+  console.error("MCP_API_KEY required in HTTP bearer mode: without it every tool is exposed to unauthenticated callers, which means remote control of this EasyPanel host. Set MCP_API_KEY, or use EASYPANEL_AUTH_MODE=oauth.");
+  process.exit(1);
+}
+
 function createServer(client: EasyPanelClient) {
 const server = new McpServer({ name: "easypanel", version: "0.3.0" });
 
+// Some procedures (build logs, project inspection) return megabytes, which would
+// blow the model's context in a single call. Cut the serialized result at this cap.
+const MAX_RESULT_CHARS = 100_000;
+
 function ok(r: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(r, null, 2) }] };
+  const text = JSON.stringify(r, null, 2);
+  if (typeof text === "string" && text.length > MAX_RESULT_CHARS) {
+    const omitted = text.length - MAX_RESULT_CHARS;
+    return { content: [{ type: "text" as const, text: `${text.slice(0, MAX_RESULT_CHARS)}\n\n[Output truncated: ${omitted} of ${text.length} characters omitted. Re-run with a narrower request (e.g. a specific id, a smaller limit, or a single service) to see the rest.]` }] };
+  }
+  return { content: [{ type: "text" as const, text }] };
 }
 function err(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true as const };
 }
 const READONLY = (process.env.MCP_ACCESS_MODE || "full").toLowerCase() === "readonly";
+// Single source for the refusal so every mutation path answers identically.
+function readonlyRefusal() {
+  return { content: [{ type: "text" as const, text: "Error: Read-only mode. Mutations are disabled (MCP_ACCESS_MODE=readonly)." }], isError: true as const };
+}
 
 async function q(proc: string, input?: Record<string, unknown>) {
   try { return ok(await client.query(proc, input as any)); } catch (e) { return err(e); }
 }
 async function m(proc: string, input?: Record<string, unknown>) {
-  if (READONLY) return { content: [{ type: "text" as const, text: "Error: Read-only mode. Mutations are disabled (MCP_ACCESS_MODE=readonly)." }], isError: true as const };
+  if (READONLY) return readonlyRefusal();
   try { return ok(await client.mutation(proc, input ?? {})); } catch (e) { return err(e); }
 }
 
@@ -263,6 +295,9 @@ server.tool("trpc_raw", "Call any EasyPanel tRPC procedure directly. 347 procedu
   input: z.record(z.string(), z.unknown()).optional(),
   isMutation: z.boolean().optional().describe("true for write operations, false for reads (default)"),
 }, async ({ procedure, input, isMutation }) => {
+  // trpc_raw reaches the same tRPC surface as the curated tools, so it has to honour
+  // the read-only guard too - otherwise it is a bypass for every mutation.
+  if (isMutation && READONLY) return readonlyRefusal();
   try {
     const result = isMutation
       ? await client.mutation(procedure, input ?? {})
